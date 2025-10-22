@@ -5,6 +5,7 @@ import argparse
 import logging
 import shlex
 import sys
+import ast
 from typing import Any, Mapping, Optional, Union, cast
 
 import evals
@@ -37,6 +38,26 @@ def get_parser() -> argparse.ArgumentParser:
         default="",
         help="Specify additional parameters to modify the behavior of the completion_fn during its creation. Parameters should be passed as a comma-separated list of key-value pairs (e.g., 'key1=value1,key2=value2'). This option allows for the dynamic modification of completion_fn settings, including the ability to override default arguments where necessary.",
     )
+    parser.add_argument(
+        "--extra_eval_cls",
+        type=str,
+        default="",
+        help="实际制定的评估类, 对应yaml文件中的cls, 优先级高于yaml文件配置"
+    )
+    parser.add_argument(
+        "--extra_eval_metrics",
+        type=list[str],
+        default=["accuracy", "f1_score"],
+        help="在评估类中需要使用的评估指标，如果不指定则使用评估类中的默认指标"
+    )
+    parser.add_argument("--api_base", type=str, default="", help="直接通过ip:port发送请求时，该参数表示发送请求的url")
+    parser.add_argument(
+        "--payload", 
+        type=str, 
+        default="{'max_tokens': 100, 'temperature': 0.0, 'stream': False, 'ignore_eos': False}",
+        help="和api_base结合使用, 表示采用ip:port发请求时的payload, 需要注意的是, 仅在api_base非空时, 该参数才会起作用"
+    )
+    parser.add_argument("--enable_pc_offload", type=bool, default=True, help="是否启用pc offload，仅在api_base非空时才生效")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--cache", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--visible", action=argparse.BooleanOptionalAction, default=None)
@@ -97,6 +118,12 @@ class OaiEvalArguments(argparse.Namespace):
     completion_fn: str
     eval: str
     extra_eval_params: str
+    completion_args: str
+    extra_eval_cls: str
+    extra_eval_metrics: list[str]
+    api_base: str
+    payload: str
+    enable_pc_offload: bool
     max_samples: Optional[int]
     cache: bool
     visible: Optional[bool]
@@ -166,9 +193,19 @@ def run(args: OaiEvalArguments, registry: Optional[Registry] = None) -> str:
     additional_completion_args = {k: v for k, v in (kv.split("=") for kv in completion_args if kv)}
 
     completion_fns = args.completion_fn.split(",")
+    # 当api_base非空时，首先通过api_base这个url去访问对应引擎
+    if args.api_base is not None:
+        additional_completion_args["api_base"] = args.api_base
+        additional_completion_args["payload"] = ast.literal_eval(args.payload)
+        additional_completion_args["enable_pc_offload"] = args.enable_pc_offload
+        
     completion_fn_instances = [
         registry.make_completion_fn(url, **additional_completion_args) for url in completion_fns
     ]
+
+    # 如果extra_eval_cls为空，使用yaml文件中指定的类作为评估类，否则使用extra_eval_cls对其更新，这里需要在run_config前, 因为record中会记录所采用的评估参数
+    if args.extra_eval_cls:
+        eval_spec.cls = args.extra_eval_cls
 
     run_config = {
         "completion_fns": completion_fns,
@@ -194,8 +231,9 @@ def run(args: OaiEvalArguments, registry: Optional[Registry] = None) -> str:
         created_by=args.user,
     )
 
+    # 日志路径
     record_path = (
-        f"/tmp/evallogs/{run_spec.run_id}_{args.completion_fn}_{args.eval}.jsonl"
+        f"./evallogs/{run_spec.run_id}_{args.completion_fn}_{args.eval}.jsonl"
         if args.record_path is None
         else args.record_path
     )
@@ -214,6 +252,7 @@ def run(args: OaiEvalArguments, registry: Optional[Registry] = None) -> str:
     run_url = f"{run_spec.run_id}"
     logger.info(_purple(f"Run started: {run_url}"))
 
+    # 实例化具体匹配方式（比如match）等，这里会将samples_jsonl的路径传入匹配类
     eval_class = registry.get_class(eval_spec)
     eval: Eval = eval_class(
         completion_fns=completion_fn_instances,
@@ -223,6 +262,9 @@ def run(args: OaiEvalArguments, registry: Optional[Registry] = None) -> str:
         registry=registry,
         **extra_eval_params,
     )
+    
+    # TODO：添加自选评估指标，这里为了不要对所有的评估类进行修改，不应该在run函数中新增参数，看看能把不能在recorder中添加参数
+    # 调用match等匹配方法的run函数，进行数据集的处理和实际的请求发送
     result = eval.run(recorder)
     try:
         add_token_usage_to_result(result, recorder)

@@ -17,13 +17,14 @@ import openai
 import yaml
 from openai import OpenAI
 
-from evals import OpenAIChatCompletionFn, OpenAICompletionFn
+from evals import OpenAIChatCompletionFn, OpenAICompletionFn, UserChatCompletionFn
 from evals.api import CompletionFn, DummyCompletionFn
 from evals.base import BaseEvalSpec, CompletionFnSpec, EvalSetSpec, EvalSpec
 from evals.elsuite.modelgraded.base import ModelGradedSpec
 from evals.utils.misc import make_object
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+# client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+client = OpenAI(api_key="***************")
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,9 @@ class Registry:
         """
         if name == "dummy":
             return DummyCompletionFn()
+        
+        if kwargs.get("api_base") is not None:
+            return UserChatCompletionFn(model=name, **kwargs)
 
         n_ctx = n_ctx_from_model_name(name)
 
